@@ -1,0 +1,12 @@
+config UDP_SOCKET
+    bool "UDP socket demo client for WiFi-enabled chips"
+    default n
+    help
+        Provides run_UDP_socket_example() to connect via WiFi and exchange
+        messages with a UDP echo server.
+
+config UDP_SOCKET_THREAD_STACK_SIZE
+    int "Stack size for the UDP socket demo thread"
+    default 2048
+    help
+        This option sets the stack size for the thread running the UDP socket demo.

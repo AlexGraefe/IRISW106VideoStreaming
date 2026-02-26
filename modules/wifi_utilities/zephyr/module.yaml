@@ -1,0 +1,4 @@
+name: wifi_utilities
+build:
+  cmake: .
+  kconfig: Kconfig

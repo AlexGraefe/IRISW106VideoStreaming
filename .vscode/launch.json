@@ -1,0 +1,19 @@
+    {
+        "version": "0.2.0",
+        "configurations": [
+        {
+            "cwd": "${workspaceRoot}",
+            "executable": "build/zephyr/zephyr.elf",
+            "name": "Debug Microcontroller",
+            "request": "launch",
+            "type": "cortex-debug",
+            "servertype": "jlink",
+            "device": "EFR32MG29BxxxF1024",
+            "armToolchainPath": "${env:HOME}/zephyr-sdk-0.17.4/armzephyr-eabi/bin",
+            "toolchainPrefix": "arm-zephyr-eabi",
+            "svdFile": "${workspaceRoot}/resources/EFR32MG29B140F1024IM40.svd",
+            "serverArgs": ["-rtos", "${workspaceRoot}/jlinkzephyr/build/libzephyr_rtos.so"],
+            "liveWatch": { "enabled": true, "samplesPerSecond": 4 }
+        }
+      ]
+    }

@@ -1,0 +1,6 @@
+# Create a new option in menuconfig
+config WIFI_UTILITIES
+    bool "WiFi utilities WiFi-enabled chips, like connecting, IP address retrieval, etc."
+    default n   # Set the library to be disabled by default
+    help
+        Adds say_hello() function to print a basic message to the console.

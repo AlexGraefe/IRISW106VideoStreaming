@@ -1,0 +1,4 @@
+name: udp_socket
+build:
+  cmake: .
+  kconfig: Kconfig
