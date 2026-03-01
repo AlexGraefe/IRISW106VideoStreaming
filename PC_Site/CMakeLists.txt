@@ -4,8 +4,26 @@ project(SocketDemo C)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+
+
 # Compiler warnings
+
+ find_package(PkgConfig REQUIRED)
+ pkg_check_modules(LIBAV REQUIRED IMPORTED_TARGET
+     libavformat
+     libavcodec
+     libswresample
+     libswscale
+     libavutil
+ )
+
+ set(CMAKE_FIND_LIBRARY_SUFFIXES .a ${CMAKE_FIND_LIBRARY_SUFFIXES})
+
 add_compile_options(-Wall -Wextra -Wpedantic)
 
 # Client executable
 add_executable(udp_client udp_socket_client.c)
+
+add_executable(decode h264_decode.c)
+
+ target_link_libraries(decode PUBLIC PkgConfig::LIBAV)
