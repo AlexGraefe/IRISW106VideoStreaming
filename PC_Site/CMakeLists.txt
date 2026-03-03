@@ -29,5 +29,5 @@ add_executable(decode h264_decode.c)
  target_link_libraries(decode PUBLIC PkgConfig::LIBAV)
 
 # H264 visualizer (FFmpeg decode + SDL2 display)
-add_executable(visualize_h264 visialize_h264.c)
+add_executable(visualize_h264 visualize_h264.c)
 target_link_libraries(visualize_h264 PUBLIC PkgConfig::LIBAV PkgConfig::SDL2)

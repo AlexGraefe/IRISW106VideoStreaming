@@ -300,3 +300,6 @@ st_ai_ws/
 generated_files/
 
 uart_logs/
+
+*.csv
+*.png

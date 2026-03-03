@@ -4,6 +4,24 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+
+ &flexcomm0 {
+	compatible = "nxp,lpc-spi";
+	pinctrl-0 = <&pinmux_flexcomm0_spi>;
+	pinctrl-names = "default";
+	status = "okay";
+	clock-frequency = <7000000>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+};
+
+/ {
+	aliases {
+		spi = &flexcomm0;
+	};
+};
+
+
 &standby {
 	status = "okay";
 };

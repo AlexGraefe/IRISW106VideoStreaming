@@ -16,6 +16,8 @@
 #define LED1_NODE DT_ALIAS(led1)
 #define LED2_NODE DT_ALIAS(led2)
 
+#define SPI_NODE DT_ALIAS(spi)
+
 /* Packet streamed from server to client */
 typedef struct {
 	uint32_t counter;

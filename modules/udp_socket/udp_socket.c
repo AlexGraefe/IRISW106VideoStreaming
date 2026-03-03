@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <zephyr/kernel.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/spi.h>
 #include <zephyr/net/socket.h>
 
 #include "wifi_utilities.h"
@@ -12,9 +13,27 @@
 
 #include <zephyr/logging/log.h>
 
+#define SPIOP  (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_OP_MODE_SLAVE)
+
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(LED2_NODE, gpios);
+
+// SPI_NODE;
+
+// static struct spi_dt_spec spispec = SPI_MCUX_FLEXCOMM_DEVICE(SPI_NODE);
+
+const struct device *spi_dev = DEVICE_DT_GET(SPI_NODE);
+static struct spi_config spi_cfg = {
+    .frequency = DT_PROP(SPI_NODE, clock_frequency),
+    .operation = SPIOP,
+    .slave = 0,
+    .cs = {
+        .gpio = {NULL}, // No GPIO for CS
+        .delay = 0,     // No delay
+    },
+};
+
 
 #define LED_TURN_OFF() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
 #define LED_TURN_RED() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
@@ -144,12 +163,14 @@ static communication_state_t state_sending_messages(communication_context_t *ctx
 	/* Stream packets continuously to the client */
 	memset(&ctx->stream_pkt, 0, sizeof(ctx->stream_pkt));
 
+	k_sleep(K_MSEC(100));
+
 	for (;;) {
 		/* Fill data array with values derived from the counter */
-		// for (int i = 0; i < STREAM_FLOAT_COUNT; i++) {
-		// 	ctx->stream_pkt.data[i] =
-		// 		(float)ctx->stream_pkt.counter * STREAM_FLOAT_COUNT + i;
-		// }
+		for (int i = 0; i < STREAM_FLOAT_COUNT; i++) {
+			ctx->stream_pkt.data[i] =
+				(float)ctx->stream_pkt.counter * STREAM_FLOAT_COUNT + i;
+		}
 
 		LED_TURN_GREEN();
 		ret = zsock_sendto(ctx->sock_fd, &ctx->stream_pkt, sizeof(ctx->stream_pkt), 0,
@@ -164,7 +185,7 @@ static communication_state_t state_sending_messages(communication_context_t *ctx
 			ctx->stream_pkt.counter, ret);
 		ctx->stream_pkt.counter++;
 
-		// k_sleep(K_MSEC(1));
+		// k_sleep(K_MSEC(1000));
 	}
 
 	return COMM_CLEANUP;
@@ -225,6 +246,36 @@ int run_udp_socket_demo(void)
         state = COMM_FAILURE;
     }
 	LED_TURN_OFF();
+
+	while(1) {
+		if (!device_is_ready(spi_dev))
+		{
+			LOG_ERR("Device SPI not ready, aborting test");
+			return -ENODEV;
+		}
+
+		uint8_t tx_buffer[100];
+
+		struct spi_buf tx_buf = {
+			.buf = tx_buffer,
+			.len = 100,
+		};
+
+		// LOG_DBG("SPI tx_buf.len = %d", tx_buf.len);
+
+		struct spi_buf_set tx_bufs = { .buffers = &tx_buf, .count = 1 };
+
+		// Send the string over SPI
+		LOG_DBG("Reading data over SPI");
+		int ret_val = spi_read(spi_dev, &spi_cfg, &tx_bufs);
+		LOG_DBG("SPI read returned %d", ret_val);
+
+		for (int i = 0; i < 10 && i < 100; i++) {
+			if (i > 0) printk(",");
+			printk("%u", tx_buffer[i]);
+		}
+		printk("\n");
+	}
 
 
 	LOG_INF("TCP ECHO CLIENT DEMO");

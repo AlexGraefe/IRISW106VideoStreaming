@@ -325,6 +325,7 @@ int main(int argc, char **argv)
             }
             data      += ret;
             data_size -= (size_t)ret;
+            printf("parser output: packet size = %d\n", pkt->size);
 
             if (pkt->size) {
                 int res = decode_and_display(c, frame, pkt,
