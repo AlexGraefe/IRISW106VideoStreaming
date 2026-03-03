@@ -10,13 +10,23 @@
 
 #include <zephyr/net/socket.h>
 
-#define SOCKET_THREAD_PRIORITY 10
+#define SOCKET_THREAD_PRIORITY 100
 
 #define LED0_NODE DT_ALIAS(led0)
 #define LED1_NODE DT_ALIAS(led1)
 #define LED2_NODE DT_ALIAS(led2)
 
 #define SPI_NODE DT_ALIAS(spi)
+
+#define IRIS_PACKET_PAYLOAD_SIZE 1024U
+
+typedef struct __attribute__((packed))
+{
+    uint32_t frame_index;
+    uint32_t packet_index;
+    uint32_t packets_per_frame;
+    uint8_t payload[IRIS_PACKET_PAYLOAD_SIZE];
+} iris_packet_t;
 
 /* Packet streamed from server to client */
 typedef struct {

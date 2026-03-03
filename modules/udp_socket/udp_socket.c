@@ -13,7 +13,12 @@
 
 #include <zephyr/logging/log.h>
 
-#define SPIOP  (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_MODE_CPOL | SPI_MODE_CPHA | SPI_OP_MODE_SLAVE)
+
+#define SPIOP  (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_SLAVE)  // SPI_MODE_CPOL | SPI_MODE_CPHA
+
+
+static uint32_t rx_size = 0;
+static uint8_t spi_buffer[60000];
 
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
@@ -254,27 +259,34 @@ int run_udp_socket_demo(void)
 			return -ENODEV;
 		}
 
-		uint8_t tx_buffer[100];
-
-		struct spi_buf tx_buf = {
-			.buf = tx_buffer,
-			.len = 100,
+		/* Read the packet size first */
+		struct spi_buf rx_buf_size = {
+			.buf = (uint8_t *)&rx_size,
+			.len = sizeof(uint32_t),
 		};
-
-		// LOG_DBG("SPI tx_buf.len = %d", tx_buf.len);
-
-		struct spi_buf_set tx_bufs = { .buffers = &tx_buf, .count = 1 };
-
-		// Send the string over SPI
-		LOG_DBG("Reading data over SPI");
-		int ret_val = spi_read(spi_dev, &spi_cfg, &tx_bufs);
-		LOG_DBG("SPI read returned %d", ret_val);
-
-		for (int i = 0; i < 10 && i < 100; i++) {
-			if (i > 0) printk(",");
-			printk("%u", tx_buffer[i]);
+		struct spi_buf_set rx_bufs_size = { .buffers = &rx_buf_size, .count = 1 };
+		int ret_val = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
+		printk("%lu\n", rx_size);
+		if (ret_val < 0) {
+			LOG_ERR("SPI read size failed");
+			while(1) {};
+			continue;
 		}
-		printk("\n");
+
+		/* Read the actual packet data */
+		struct spi_buf rx_buf_data = {
+			.buf = spi_buffer,
+			.len = rx_size,
+		};
+		struct spi_buf_set rx_bufs_data = { .buffers = &rx_buf_data, .count = 1 };
+		ret_val = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
+		if (ret_val < 0) {
+			LOG_ERR("SPI read data failed");
+						while(1) {};
+			continue;
+		}
+
+		printk("%u,%u,%u\n", rx_size, spi_buffer[0], spi_buffer[rx_size-1]);
 	}
 
 
