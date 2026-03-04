@@ -3,7 +3,6 @@
 
 #define SERVER_PORT      8080
 #define BUFFER_SIZE      256
-#define STREAM_FLOAT_COUNT 350
 
 #include <stdbool.h>
 #include <stdint.h>
@@ -19,25 +18,22 @@
 #define SPI_NODE DT_ALIAS(spi)
 
 #define IRIS_PACKET_PAYLOAD_SIZE 1024U
+#define SPI_MAX_FRAME_SIZE       60000U
 
 typedef struct __attribute__((packed))
 {
-    uint32_t frame_index;
-    uint32_t packet_index;
-    uint32_t packets_per_frame;
+	uint32_t frame_nmbr;
+	uint32_t packet_idx;
+	uint32_t packet_nmbr;
     uint8_t payload[IRIS_PACKET_PAYLOAD_SIZE];
 } iris_packet_t;
-
-/* Packet streamed from server to client */
-typedef struct {
-	uint32_t counter;
-	float    data[STREAM_FLOAT_COUNT];
-} __attribute__((packed)) stream_packet_t;
 
 typedef enum {
 	COMM_WIFI_CONNECTING,
 	COMM_WAITING_FOR_IP,
 	COMM_ESTABLISHING_SERVER,
+	COMM_CONNECTING_TO_CLIENT,
+	COMM_SPI_HANDSHAKE,
 	COMM_SENDING_MESSAGES,
 	COMM_FAILURE,
 	COMM_CLEANUP,
@@ -48,7 +44,6 @@ typedef struct {
 	struct sockaddr_in server_addr;
 	struct sockaddr    client_addr;
 	net_socklen_t      client_addr_len;
-	stream_packet_t    stream_pkt;
 	char               buffer[BUFFER_SIZE];
 	char               ip_addr[NET_IPV4_ADDR_LEN];
 	char               client_ip_addr[NET_IPV4_ADDR_LEN];

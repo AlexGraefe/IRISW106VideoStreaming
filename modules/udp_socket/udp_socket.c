@@ -5,6 +5,7 @@
 #include <zephyr/drivers/gpio.h>
 #include <zephyr/drivers/spi.h>
 #include <zephyr/net/socket.h>
+#include <zephyr/sys/util.h>
 
 #include "wifi_utilities.h"
 #include "secret/wifi_pswd.h"
@@ -16,9 +17,13 @@
 
 #define SPIOP  (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_SLAVE)  // SPI_MODE_CPOL | SPI_MODE_CPHA
 
+#define SPI_RETRY_COUNT UINT16_MAX
+
 
 static uint32_t rx_size = 0;
-static uint8_t spi_buffer[60000];
+static uint8_t spi_buffer[SPI_MAX_FRAME_SIZE];
+static uint8_t tx_handshake[4] = {255, 254, 253, 252};
+static uint8_t rx_handshake[4];
 
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
@@ -45,6 +50,9 @@ static struct spi_config spi_cfg = {
 #define LED_TURN_GREEN() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 1); gpio_pin_set_dt(&led_blue, 0); } while(0)
 #define LED_TURN_BLUE() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 1); } while(0)
 #define LED_TURN_YELLOW() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 1); gpio_pin_set_dt(&led_blue, 0); } while(0)
+#define LED_TURN_CYAN() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 1); gpio_pin_set_dt(&led_blue, 1); } while(0)
+#define LED_TURN_MAGENTA() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 1); } while(0)
+#define LED_TURN_WHITE() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 1); gpio_pin_set_dt(&led_blue, 1); } while(0)
 
 
 LOG_MODULE_REGISTER(udp_socket_demo, LOG_LEVEL_DBG);
@@ -52,6 +60,47 @@ LOG_MODULE_REGISTER(udp_socket_demo, LOG_LEVEL_DBG);
 K_THREAD_DEFINE(udp_thread, CONFIG_UDP_SOCKET_THREAD_STACK_SIZE,
                 run_udp_socket_demo, NULL, NULL, NULL,
                 SOCKET_THREAD_PRIORITY, 0, 0);
+
+static int spi_transceive_with_verification(const uint8_t *tx_data, uint8_t *rx_data, size_t len)
+{
+	int ret;
+
+	struct spi_buf tx_buf = {
+		.buf = (void *)tx_data,
+		.len = len,
+	};
+	struct spi_buf_set tx_bufs = {
+		.buffers = &tx_buf,
+		.count = 1,
+	};
+	struct spi_buf rx_buf = {
+		.buf = rx_data,
+		.len = len,
+	};
+	struct spi_buf_set rx_bufs = {
+		.buffers = &rx_buf,
+		.count = 1,
+	};
+
+	for (int attempt = 1; attempt <= SPI_RETRY_COUNT; attempt++) {
+		memset(rx_data, 0, len);
+		ret = spi_transceive(spi_dev, &spi_cfg, &tx_bufs, &rx_bufs);
+		if (ret < 0) {
+			LOG_WRN("SPI transceive attempt %d/%d failed (%d)",
+				attempt, SPI_RETRY_COUNT, ret);
+			continue;
+		}
+
+		if (memcmp(tx_data, rx_data, len) == 0) {
+			return 0;
+		}
+
+		LOG_WRN("SPI verify mismatch on attempt %d/%d",
+			attempt, SPI_RETRY_COUNT);
+	}
+
+	return -EIO;
+}
 
 static const char *state_to_string(communication_state_t state)
 {
@@ -62,6 +111,10 @@ static const char *state_to_string(communication_state_t state)
 		return "COMM_WAITING_FOR_IP";
 	case COMM_ESTABLISHING_SERVER:
 		return "COMM_CONNECTING_TO_SERVER";
+	case COMM_CONNECTING_TO_CLIENT:
+		return "COMM_CONNECTING_TO_CLIENT";
+	case COMM_SPI_HANDSHAKE:
+		return "COMM_SPI_HANDSHAKE";
 	case COMM_SENDING_MESSAGES:
 		return "COMM_SENDING_MESSAGES";
 	case COMM_FAILURE:
@@ -77,7 +130,7 @@ static const char *state_to_string(communication_state_t state)
 
 static communication_state_t state_wifi_connecting(communication_context_t *ctx)
 {
-	LED_TURN_RED();
+	LED_TURN_MAGENTA();
 	if (my_wifi_init() != 0) {
 		LOG_ERR("Failed to initialize WiFi module");
 		ctx->failure_from_state = COMM_WIFI_CONNECTING;
@@ -93,24 +146,27 @@ static communication_state_t state_wifi_connecting(communication_context_t *ctx)
 	}
 
 	ctx->wifi_connected = true;
-	LED_TURN_BLUE();
 	return COMM_WAITING_FOR_IP;
 }
 
 static communication_state_t state_waiting_for_ip(communication_context_t *ctx)
 {
+	LED_TURN_CYAN();
+
 	if (wifi_wait_for_ip_addr(ctx->ip_addr) != 0) {
 		LOG_ERR("Failed while waiting for IPv4 address");
 		ctx->failure_from_state = COMM_WAITING_FOR_IP;
 		return COMM_FAILURE;
 	}
-	LED_TURN_GREEN();
+
 	return COMM_ESTABLISHING_SERVER;
 }
 
 static communication_state_t state_establishing_server(communication_context_t *ctx)
 {
 	int ret;
+
+	LED_TURN_YELLOW();
 
 	// init socket
 	ctx->sock_fd = zsock_socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -136,18 +192,17 @@ static communication_state_t state_establishing_server(communication_context_t *
 	}
 
 	LOG_INF("[Server] listening at %s:%d", ctx->ip_addr, SERVER_PORT);
-	LED_TURN_YELLOW();
-	return COMM_SENDING_MESSAGES;
+	return COMM_CONNECTING_TO_CLIENT;
 }
 
-static communication_state_t state_sending_messages(communication_context_t *ctx)
+static communication_state_t state_connecting_to_client(communication_context_t *ctx)
 {
 	int ret;
 
-	ctx->failure_from_state = COMM_SENDING_MESSAGES;
+	ctx->failure_from_state = COMM_CONNECTING_TO_CLIENT;
 
 	/* Wait for a start message so we learn the client's address and port */
-	LED_TURN_GREEN();
+	LED_TURN_WHITE();
 	ctx->client_addr_len = sizeof(ctx->client_addr);
 	ret = zsock_recvfrom(ctx->sock_fd, ctx->buffer, sizeof(ctx->buffer) - 1, 0,
 			     &ctx->client_addr, &ctx->client_addr_len);
@@ -162,35 +217,111 @@ static communication_state_t state_sending_messages(communication_context_t *ctx
 			  ctx->client_ip_addr, NET_IPV4_ADDR_LEN) == NULL) {
 		LOG_ERR("Failed to convert client address to string");
 	}
-	LOG_INF("[Server] Received start command '%s' from %s — starting stream",
+	LOG_INF("[Server] Received start command '%s' from %s",
 		ctx->buffer, ctx->client_ip_addr);
 
-	/* Stream packets continuously to the client */
-	memset(&ctx->stream_pkt, 0, sizeof(ctx->stream_pkt));
+	return COMM_SPI_HANDSHAKE;
+}
 
-	k_sleep(K_MSEC(100));
+static communication_state_t state_spi_handshake(communication_context_t *ctx)
+{
+	int ret;
+
+	ctx->failure_from_state = COMM_SPI_HANDSHAKE;
+	LED_TURN_BLUE();
+
+	if (!device_is_ready(spi_dev)) {
+		LOG_ERR("SPI device not ready");
+		return COMM_FAILURE;
+	}
+	
+	LOG_DBG("Starting SPI handshake with master...");
+	ret = spi_transceive_with_verification(tx_handshake, rx_handshake,
+					      sizeof(tx_handshake));
+	if (ret < 0) {
+		LOG_ERR("SPI handshake failed after retries (%d)", ret);
+		return COMM_FAILURE;
+	}
+
+	LOG_INF("SPI handshake completed");
+	return COMM_SENDING_MESSAGES;
+}
+
+static communication_state_t state_sending_messages(communication_context_t *ctx)
+{
+	int ret;
+	uint32_t frame_nmbr = 0;
+
+	ctx->failure_from_state = COMM_SENDING_MESSAGES;
 
 	for (;;) {
-		/* Fill data array with values derived from the counter */
-		for (int i = 0; i < STREAM_FLOAT_COUNT; i++) {
-			ctx->stream_pkt.data[i] =
-				(float)ctx->stream_pkt.counter * STREAM_FLOAT_COUNT + i;
-		}
-
+		/* Receive frame size */
 		LED_TURN_GREEN();
-		ret = zsock_sendto(ctx->sock_fd, &ctx->stream_pkt, sizeof(ctx->stream_pkt), 0,
-				   &ctx->client_addr, ctx->client_addr_len);
-		LED_TURN_YELLOW();
+		struct spi_buf rx_buf_size = {
+			.buf = (uint8_t *)&rx_size,
+			.len = sizeof(uint32_t),
+		};
+		struct spi_buf_set rx_bufs_size = {
+			.buffers = &rx_buf_size,
+			.count = 1,
+		};
+
+		ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
 		if (ret < 0) {
-			LOG_ERR("sendto failed (errno=%d)", errno);
+			LOG_ERR("SPI read size failed (%d)", ret);
 			return COMM_FAILURE;
 		}
 
-		LOG_DBG("[Server] Sent packet counter=%u (%d bytes)",
-			ctx->stream_pkt.counter, ret);
-		ctx->stream_pkt.counter++;
+		if ((rx_size == 0U) || (rx_size > SPI_MAX_FRAME_SIZE)) {
+			LOG_ERR("Invalid SPI frame size: %u", rx_size);
+			return COMM_FAILURE;
+		}
 
-		// k_sleep(K_MSEC(1000));
+		/* Receive frame payload */
+		struct spi_buf rx_buf_data = {
+			.buf = spi_buffer,
+			.len = rx_size,
+		};
+		struct spi_buf_set rx_bufs_data = {
+			.buffers = &rx_buf_data,
+			.count = 1,
+		};
+
+		ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
+		if (ret < 0) {
+			LOG_ERR("SPI read data failed (%d)", ret);
+			return COMM_FAILURE;
+		}
+
+		uint32_t packet_nmbr = DIV_ROUND_UP(rx_size, IRIS_PACKET_PAYLOAD_SIZE);
+		for (uint32_t packet_idx = 0; packet_idx < packet_nmbr; packet_idx++) {
+			iris_packet_t pkt = {
+				.frame_nmbr = frame_nmbr,
+				.packet_idx = packet_idx,
+				.packet_nmbr = packet_nmbr,
+			};
+
+			size_t offset = packet_idx * IRIS_PACKET_PAYLOAD_SIZE;
+			size_t chunk_len = MIN((size_t)IRIS_PACKET_PAYLOAD_SIZE,
+					       (size_t)(rx_size - offset));
+
+			memset(pkt.payload, 0, sizeof(pkt.payload));
+			memcpy(pkt.payload, &spi_buffer[offset], chunk_len);
+
+			/* Unique step color: UDP packet send */
+			LED_TURN_RED();
+			ret = zsock_sendto(ctx->sock_fd, &pkt, sizeof(pkt), 0,
+					   &ctx->client_addr, ctx->client_addr_len);
+			if (ret < 0) {
+				LOG_ERR("UDP sendto failed frame=%u packet=%u (errno=%d)",
+					frame_nmbr, packet_idx, errno);
+				return COMM_FAILURE;
+			}
+		}
+
+		LOG_INF("Frame %u: %u bytes sent in %u packet(s)",
+			frame_nmbr, rx_size, packet_nmbr);
+		frame_nmbr++;
 	}
 
 	return COMM_CLEANUP;
@@ -207,6 +338,7 @@ static communication_state_t state_failure(communication_context_t *ctx)
 
 	ctx->exit_code = -1;
 	while (1) {
+		/* Unique failure indication: blinking red */
 		LED_TURN_RED();
 		k_sleep(K_SECONDS(1));
 		LED_TURN_OFF();
@@ -217,6 +349,14 @@ static communication_state_t state_failure(communication_context_t *ctx)
 
 static communication_state_t state_cleanup(communication_context_t *ctx)
 {
+	/* Unique cleanup indication: blinking blue */
+	for (int i = 0; i < 3; i++) {
+		LED_TURN_BLUE();
+		k_sleep(K_MSEC(150));
+		LED_TURN_OFF();
+		k_sleep(K_MSEC(150));
+	}
+
 	if (ctx->socket_open) {
 		zsock_close(ctx->sock_fd);
 		ctx->socket_open = false;
@@ -235,7 +375,7 @@ int run_udp_socket_demo(void)
 {
 	communication_state_t state = COMM_WIFI_CONNECTING;
 
-	/* static so the 16 KB stream_packet_t does not live on the thread stack */
+	/* static so context does not live on the thread stack */
 	static communication_context_t ctx = {
 		.sock_fd = -1,
 		.wifi_connected = false,
@@ -252,47 +392,10 @@ int run_udp_socket_demo(void)
     }
 	LED_TURN_OFF();
 
-	while(1) {
-		if (!device_is_ready(spi_dev))
-		{
-			LOG_ERR("Device SPI not ready, aborting test");
-			return -ENODEV;
-		}
-
-		/* Read the packet size first */
-		struct spi_buf rx_buf_size = {
-			.buf = (uint8_t *)&rx_size,
-			.len = sizeof(uint32_t),
-		};
-		struct spi_buf_set rx_bufs_size = { .buffers = &rx_buf_size, .count = 1 };
-		int ret_val = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
-		printk("%lu\n", rx_size);
-		if (ret_val < 0) {
-			LOG_ERR("SPI read size failed");
-			while(1) {};
-			continue;
-		}
-
-		/* Read the actual packet data */
-		struct spi_buf rx_buf_data = {
-			.buf = spi_buffer,
-			.len = rx_size,
-		};
-		struct spi_buf_set rx_bufs_data = { .buffers = &rx_buf_data, .count = 1 };
-		ret_val = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
-		if (ret_val < 0) {
-			LOG_ERR("SPI read data failed");
-						while(1) {};
-			continue;
-		}
-
-		printk("%u,%u,%u\n", rx_size, spi_buffer[0], spi_buffer[rx_size-1]);
-	}
-
-
-	LOG_INF("TCP ECHO CLIENT DEMO");
+	LOG_INF("UDP SPI STREAMER");
 
 	while (state != COMM_DONE) {
+		LOG_DBG("State: %s", state_to_string(state));
 		switch (state) {
 		case COMM_WIFI_CONNECTING:
 			state = state_wifi_connecting(&ctx);
@@ -302,6 +405,12 @@ int run_udp_socket_demo(void)
 			break;
 		case COMM_ESTABLISHING_SERVER:
 			state = state_establishing_server(&ctx);
+			break;
+		case COMM_CONNECTING_TO_CLIENT:
+			state = state_connecting_to_client(&ctx);
+			break;
+		case COMM_SPI_HANDSHAKE:
+			state = state_spi_handshake(&ctx);
 			break;
 		case COMM_SENDING_MESSAGES:
 			state = state_sending_messages(&ctx);
