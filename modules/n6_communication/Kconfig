@@ -1,0 +1,11 @@
+config N6_COMMUNICATION
+    bool "N6 Communication Module"
+    default n
+    help
+        Enable communication to the N6 module.
+
+config N6_COMMUNICATION_THREAD_STACK_SIZE
+    int "N6 Communication Thread Stack Size"
+    default 2048
+    help
+        Sets the stack size (in bytes) for the N6 communication thread.

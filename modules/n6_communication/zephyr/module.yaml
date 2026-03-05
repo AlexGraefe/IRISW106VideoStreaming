@@ -1,0 +1,4 @@
+name: n6_communication
+build:
+  cmake: .
+  kconfig: Kconfig

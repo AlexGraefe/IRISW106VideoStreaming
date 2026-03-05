@@ -20,6 +20,7 @@
 #define PACKET_QUEUE_CAPACITY 512U
 #define ENCODED_QUEUE_CAPACITY 64U
 #define DECODED_QUEUE_CAPACITY 32U
+#define MAX_PACKETS_PER_FRAME 2048U
 
 /* Must match the packet layout sent by the embedded UDP server. */
 typedef struct __attribute__((packed)) {
@@ -816,16 +817,39 @@ static int frame_assembly_init(frame_assembly_t *assembly,
 	frame_assembly_reset(assembly);
 
 	if (packet_nmbr == 0U) {
+		fprintf(stderr,
+				"Invalid packet count for frame %u: packet_nmbr=0\n",
+				frame_nmbr);
+		return -1;
+	}
+
+	if (packet_nmbr > MAX_PACKETS_PER_FRAME) {
+		fprintf(stderr,
+				"Invalid packet count for frame %u: packet_nmbr=%u (max %u)\n",
+				frame_nmbr, packet_nmbr, MAX_PACKETS_PER_FRAME);
+		return -1;
+	}
+
+	if ((size_t)packet_nmbr > (SIZE_MAX / IRIS_PACKET_PAYLOAD_SIZE)) {
+		fprintf(stderr,
+				"packet_nmbr overflow for frame %u: packet_nmbr=%u payload=%u\n",
+				frame_nmbr, packet_nmbr, IRIS_PACKET_PAYLOAD_SIZE);
 		return -1;
 	}
 
 	assembly->frame_nmbr = frame_nmbr;
 	assembly->packet_nmbr = packet_nmbr;
-	/* Allocate contiguous storage for packet_nmbr chunks of 1024 bytes each. */
+	/* Allocate contiguous storage for packet_nmbr chunks of 1400 bytes each. */
 	assembly->data = calloc((size_t)packet_nmbr, IRIS_PACKET_PAYLOAD_SIZE);
 	/* received[i] marks whether chunk i is already copied (dedupe support). */
-	assembly->received = calloc(packet_nmbr, sizeof(uint8_t));
+	assembly->received = calloc((size_t)packet_nmbr, sizeof(*assembly->received));
 	if (!assembly->data || !assembly->received) {
+		fprintf(stderr,
+				"Allocation failed for frame %u: packet_nmbr=%u (%zu bytes data + %zu bytes bitmap)\n",
+				frame_nmbr,
+				packet_nmbr,
+				(size_t)packet_nmbr * IRIS_PACKET_PAYLOAD_SIZE,
+				(size_t)packet_nmbr * sizeof(*assembly->received));
 		frame_assembly_reset(assembly);
 		return -1;
 	}

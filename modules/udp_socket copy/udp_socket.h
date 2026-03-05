@@ -9,9 +9,7 @@
 
 #include <zephyr/net/socket.h>
 
-#define UDP_DATA_MAX_SIZE 60000
-
-#define SOCKET_THREAD_PRIORITY 10
+#define SOCKET_THREAD_PRIORITY 100
 
 #define LED0_NODE DT_ALIAS(led0)
 #define LED1_NODE DT_ALIAS(led1)
@@ -35,6 +33,7 @@ typedef enum {
 	COMM_WAITING_FOR_IP,
 	COMM_ESTABLISHING_SERVER,
 	COMM_CONNECTING_TO_CLIENT,
+	COMM_HANDSHAKE,
 	COMM_SENDING_MESSAGES,
 	COMM_FAILURE,
 	COMM_CLEANUP,
@@ -55,17 +54,7 @@ typedef struct {
 	communication_state_t failure_from_state;
 } communication_context_t;
 
-typedef struct {
-	uint8_t enabled;
-} udp_message_t;
-
-typedef struct {
-	void *fifo_reserved;  // 1st word reserved for use by FIFO
-	iris_packet_t packet;
-} udp_data_t;
-
 int run_udp_socket_demo(void);
-struct k_fifo *get_udp_fifo(void);
-struct k_msgq *get_udp_msgq(void);
+struct k_fifo *get_udp_fifo(void)
 
 #endif /* TCP_SOCKET_H */

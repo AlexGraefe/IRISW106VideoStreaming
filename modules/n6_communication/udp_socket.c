@@ -14,12 +14,38 @@
 
 #include <zephyr/logging/log.h>
 
+
+#define SPIOP  (SPI_WORD_SET(8) | SPI_TRANSFER_MSB | SPI_OP_MODE_SLAVE)  // SPI_MODE_CPOL | SPI_MODE_CPHA
+
+#define SPI_RETRY_COUNT UINT16_MAX
+
+
+static uint32_t rx_size = 0;
+static uint8_t spi_buffer[SPI_MAX_FRAME_SIZE];
+static uint8_t tx_handshake[4] = {255, 254, 253, 252};
+static uint8_t rx_handshake[4];
+
 static const struct gpio_dt_spec led_red = GPIO_DT_SPEC_GET(LED0_NODE, gpios);
 static const struct gpio_dt_spec led_green = GPIO_DT_SPEC_GET(LED1_NODE, gpios);
 static const struct gpio_dt_spec led_blue = GPIO_DT_SPEC_GET(LED2_NODE, gpios);
 
-K_MSGQ_DEFINE(udp_msgq, sizeof(udp_message_t), 10, 1);
+// SPI_NODE;
+
+// static struct spi_dt_spec spispec = SPI_MCUX_FLEXCOMM_DEVICE(SPI_NODE);
+
+const struct device *spi_dev = DEVICE_DT_GET(SPI_NODE);
+static struct spi_config spi_cfg = {
+    .frequency = DT_PROP(SPI_NODE, clock_frequency),
+    .operation = SPIOP,
+    .slave = 0,
+    .cs = {
+        .gpio = {NULL}, // No GPIO for CS
+        .delay = 0,     // No delay
+    },
+};
+
 K_FIFO_DEFINE(udp_fifo);
+K_SEM_DEFINE(spi_sem, 0, 1);
 
 #define LED_TURN_OFF() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
 #define LED_TURN_RED() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
@@ -37,6 +63,47 @@ K_THREAD_DEFINE(udp_thread, CONFIG_UDP_SOCKET_THREAD_STACK_SIZE,
                 run_udp_socket_demo, NULL, NULL, NULL,
                 SOCKET_THREAD_PRIORITY, 0, 0);
 
+static int spi_transceive_with_verification(const uint8_t *tx_data, uint8_t *rx_data, size_t len)
+{
+	int ret;
+
+	struct spi_buf tx_buf = {
+		.buf = (void *)tx_data,
+		.len = len,
+	};
+	struct spi_buf_set tx_bufs = {
+		.buffers = &tx_buf,
+		.count = 1,
+	};
+	struct spi_buf rx_buf = {
+		.buf = rx_data,
+		.len = len,
+	};
+	struct spi_buf_set rx_bufs = {
+		.buffers = &rx_buf,
+		.count = 1,
+	};
+
+	for (int attempt = 1; attempt <= SPI_RETRY_COUNT; attempt++) {
+		memset(rx_data, 0, len);
+		ret = spi_transceive(spi_dev, &spi_cfg, &tx_bufs, &rx_bufs);
+		if (ret < 0) {
+			LOG_WRN("SPI transceive attempt %d/%d failed (%d)",
+				attempt, SPI_RETRY_COUNT, ret);
+			continue;
+		}
+
+		if (memcmp(tx_data, rx_data, len) == 0) {
+			return 0;
+		}
+
+		LOG_WRN("SPI verify mismatch on attempt %d/%d",
+			attempt, SPI_RETRY_COUNT);
+	}
+
+	return -EIO;
+}
+
 static const char *state_to_string(communication_state_t state)
 {
 	switch (state) {
@@ -48,6 +115,8 @@ static const char *state_to_string(communication_state_t state)
 		return "COMM_CONNECTING_TO_SERVER";
 	case COMM_CONNECTING_TO_CLIENT:
 		return "COMM_CONNECTING_TO_CLIENT";
+	case COMM_HANDSHAKE:
+		return "COMM_SPI_HANDSHAKE";
 	case COMM_SENDING_MESSAGES:
 		return "COMM_SENDING_MESSAGES";
 	case COMM_FAILURE:
@@ -153,34 +222,130 @@ static communication_state_t state_connecting_to_client(communication_context_t 
 	LOG_INF("[Server] Received start command '%s' from %s",
 		ctx->buffer, ctx->client_ip_addr);
 
-	udp_message_t message;
-	message.enabled = 1;
-	k_msgq_put(&udp_msgq, &message, K_NO_WAIT);
+	return COMM_HANDSHAKE;
+}
+
+static communication_state_t state_spi_handshake(communication_context_t *ctx)
+{
+	int ret;
+
+	ctx->failure_from_state = COMM_HANDSHAKE;
+	LED_TURN_BLUE();
+
+	if (!device_is_ready(spi_dev)) {
+		LOG_ERR("SPI device not ready");
+		return COMM_FAILURE;
+	}
+	
+	LOG_DBG("Starting SPI handshake with master...");
+	ret = spi_transceive_with_verification(tx_handshake, rx_handshake,
+					      sizeof(tx_handshake));
+	if (ret < 0) {
+		LOG_ERR("SPI handshake failed after retries (%d)", ret);
+		return COMM_FAILURE;
+	}
+
+	LOG_INF("SPI handshake completed");
 	return COMM_SENDING_MESSAGES;
+}
+
+static void spi_rx_cb(const struct device *dev, int result, void *data)
+{
+	if (result < 0) {
+		LOG_ERR("SPI async transceive failed with result %d", result);
+		return;
+	} 
+	k_sem_give(&spi_sem);
 }
 
 
 static communication_state_t state_sending_messages(communication_context_t *ctx)
 {
 	int ret;
+	uint32_t frame_nmbr = 0;
 
 	ctx->failure_from_state = COMM_SENDING_MESSAGES;
-
-	udp_data_t *udp_data_ptr;
 
 	for (;;) {
 		/* Receive frame size */
 		LED_TURN_GREEN();
-		udp_data_ptr = k_fifo_get(&udp_fifo, K_FOREVER);
+		struct spi_buf rx_buf_size = {
+			.buf = (uint8_t *)&rx_size,
+			.len = sizeof(uint32_t),
+		};
+		struct spi_buf_set rx_bufs_size = {
+			.buffers = &rx_buf_size,
+			.count = 1,
+		};
+		printk("s\n");
+		// ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
+		ret = spi_transceive_cb(spi_dev, &spi_cfg, NULL, &rx_bufs_size, spi_rx_cb, NULL);
 
-		LED_TURN_RED();
-		ret = zsock_sendto(ctx->sock_fd, &udp_data_ptr->packet, sizeof(iris_packet_t), 0,
-					&ctx->client_addr, ctx->client_addr_len);
 		if (ret < 0) {
-			LOG_ERR("UDP sendto failed frame=%u packet=%u (errno=%d)",
-				udp_data_ptr->packet.frame_nmbr, udp_data_ptr->packet.packet_idx, errno);
+			LOG_ERR("SPI read size failed (%d)", ret);
 			return COMM_FAILURE;
 		}
+		
+		if (k_sem_take(&spi_sem, K_FOREVER) != 0) {
+        	printk("Input data not available!");
+    	}
+
+		if ((rx_size == 0U) || (rx_size > SPI_MAX_FRAME_SIZE)) {
+			LOG_ERR("Invalid SPI frame size: %u", rx_size);
+			return COMM_FAILURE;
+		}
+
+		/* Receive frame payload */
+		struct spi_buf rx_buf_data = {
+			.buf = spi_buffer,
+			.len = rx_size,
+		};
+		struct spi_buf_set rx_bufs_data = {
+			.buffers = &rx_buf_data,
+			.count = 1,
+		};
+
+		// ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
+		ret = spi_transceive_cb(spi_dev, &spi_cfg, NULL, &rx_bufs_data, spi_rx_cb, NULL);
+
+		if (ret < 0) {
+			LOG_ERR("SPI read data failed (%d)", ret);
+			return COMM_FAILURE;
+		}
+
+		if (k_sem_take(&spi_sem, K_FOREVER) != 0) {
+        	printk("Input data not available!");
+    	}
+
+		uint32_t packet_nmbr = DIV_ROUND_UP(rx_size, IRIS_PACKET_PAYLOAD_SIZE);
+		for (uint32_t packet_idx = 0; packet_idx < packet_nmbr; packet_idx++) {
+			iris_packet_t pkt = {
+				.frame_nmbr = frame_nmbr,
+				.packet_idx = packet_idx,
+				.packet_nmbr = packet_nmbr,
+			};
+
+			size_t offset = packet_idx * IRIS_PACKET_PAYLOAD_SIZE;
+			size_t chunk_len = MIN((size_t)IRIS_PACKET_PAYLOAD_SIZE,
+					       (size_t)(rx_size - offset));
+
+			memset(pkt.payload, 0, sizeof(pkt.payload));
+			memcpy(pkt.payload, &spi_buffer[offset], chunk_len);
+
+			/* Unique step color: UDP packet send */
+			LED_TURN_RED();
+			ret = zsock_sendto(ctx->sock_fd, &pkt, sizeof(pkt), 0,
+					   &ctx->client_addr, ctx->client_addr_len);
+			if (ret < 0) {
+				LOG_ERR("UDP sendto failed frame=%u packet=%u (errno=%d)",
+					frame_nmbr, packet_idx, errno);
+				return COMM_FAILURE;
+			}
+		}
+
+		LOG_INF("Frame %u: %u bytes sent in %u packet(s)",
+			frame_nmbr, rx_size, packet_nmbr);
+		frame_nmbr++;
 	}
 
 	return COMM_CLEANUP;
@@ -268,6 +433,9 @@ int run_udp_socket_demo(void)
 		case COMM_CONNECTING_TO_CLIENT:
 			state = state_connecting_to_client(&ctx);
 			break;
+		case COMM_HANDSHAKE:
+			state = state_spi_handshake(&ctx);
+			break;
 		case COMM_SENDING_MESSAGES:
 			state = state_sending_messages(&ctx);
 			break;
@@ -293,9 +461,4 @@ int run_udp_socket_demo(void)
 struct k_fifo *get_udp_fifo(void)
 {
 	return &udp_fifo;
-}
-
-struct k_msgq *get_udp_msgq(void)
-{
-	return &udp_msgq;
 }
