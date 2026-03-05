@@ -44,6 +44,7 @@ static struct spi_config spi_cfg = {
     },
 };
 
+K_SEM_DEFINE(spi_sem, 0, 1);
 
 #define LED_TURN_OFF() do { gpio_pin_set_dt(&led_red, 0); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
 #define LED_TURN_RED() do { gpio_pin_set_dt(&led_red, 1); gpio_pin_set_dt(&led_green, 0); gpio_pin_set_dt(&led_blue, 0); } while(0)
@@ -247,6 +248,16 @@ static communication_state_t state_spi_handshake(communication_context_t *ctx)
 	return COMM_SENDING_MESSAGES;
 }
 
+static void spi_rx_cb(const struct device *dev, int result, void *data)
+{
+	if (result < 0) {
+		LOG_ERR("SPI async transceive failed with result %d", result);
+		return;
+	} 
+	k_sem_give(&spi_sem);
+}
+
+
 static communication_state_t state_sending_messages(communication_context_t *ctx)
 {
 	int ret;
@@ -265,12 +276,18 @@ static communication_state_t state_sending_messages(communication_context_t *ctx
 			.buffers = &rx_buf_size,
 			.count = 1,
 		};
+		printk("s\n");
+		// ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
+		ret = spi_transceive_cb(spi_dev, &spi_cfg, NULL, &rx_bufs_size, spi_rx_cb, NULL);
 
-		ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_size);
 		if (ret < 0) {
 			LOG_ERR("SPI read size failed (%d)", ret);
 			return COMM_FAILURE;
 		}
+		
+		if (k_sem_take(&spi_sem, K_FOREVER) != 0) {
+        	printk("Input data not available!");
+    	}
 
 		if ((rx_size == 0U) || (rx_size > SPI_MAX_FRAME_SIZE)) {
 			LOG_ERR("Invalid SPI frame size: %u", rx_size);
@@ -287,11 +304,17 @@ static communication_state_t state_sending_messages(communication_context_t *ctx
 			.count = 1,
 		};
 
-		ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
+		// ret = spi_read(spi_dev, &spi_cfg, &rx_bufs_data);
+		ret = spi_transceive_cb(spi_dev, &spi_cfg, NULL, &rx_bufs_data, spi_rx_cb, NULL);
+
 		if (ret < 0) {
 			LOG_ERR("SPI read data failed (%d)", ret);
 			return COMM_FAILURE;
 		}
+
+		if (k_sem_take(&spi_sem, K_FOREVER) != 0) {
+        	printk("Input data not available!");
+    	}
 
 		uint32_t packet_nmbr = DIV_ROUND_UP(rx_size, IRIS_PACKET_PAYLOAD_SIZE);
 		for (uint32_t packet_idx = 0; packet_idx < packet_nmbr; packet_idx++) {
