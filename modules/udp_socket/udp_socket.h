@@ -17,7 +17,7 @@
 
 #define SPI_NODE DT_ALIAS(spi)
 
-#define IRIS_PACKET_PAYLOAD_SIZE 1024U
+#define IRIS_PACKET_PAYLOAD_SIZE 1400U
 #define SPI_MAX_FRAME_SIZE       60000U
 
 typedef struct __attribute__((packed))
