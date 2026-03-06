@@ -124,7 +124,7 @@ static communication_state_t state_establishing_server(communication_context_t *
 		return COMM_FAILURE;
 	}
 
-	LOG_INF("[Server] listening at %s:%d", ctx->ip_addr, SERVER_PORT);
+	printk("[Server] listening at %s:%d", ctx->ip_addr, SERVER_PORT);
 	return COMM_CONNECTING_TO_CLIENT;
 }
 
@@ -150,7 +150,7 @@ static communication_state_t state_connecting_to_client(communication_context_t 
 			  ctx->client_ip_addr, NET_IPV4_ADDR_LEN) == NULL) {
 		LOG_ERR("Failed to convert client address to string");
 	}
-	LOG_INF("[Server] Received start command '%s' from %s",
+	printk("[Server] Received start command '%s' from %s",
 		ctx->buffer, ctx->client_ip_addr);
 
 	udp_message_t message;
