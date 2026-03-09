@@ -19,10 +19,11 @@
 #include <SDL2/SDL.h>
 
 #define PORT 8080
+#define USE_TCP 0
 #define IRIS_PACKET_PAYLOAD_SIZE 1400U
 #define PACKET_QUEUE_CAPACITY 512U
 #define ENCODED_QUEUE_CAPACITY 64U
-#define DECODED_QUEUE_CAPACITY 30U
+#define DECODED_QUEUE_CAPACITY 2U
 #define MAX_PACKETS_PER_FRAME 2048U
 #define STATS_WINDOW_SIZE 30U
 #define STATS_PRINT_INTERVAL_NS 1000000000ULL
@@ -680,7 +681,40 @@ static void *receiver_thread_main(void *arg)
 			break;
 		}
 
-		ssize_t bytes = recv(app->sock_fd, &msg->packet, sizeof(msg->packet), 0);
+		ssize_t bytes = 0;
+#if USE_TCP
+		size_t offset = 0U;
+		while (offset < sizeof(msg->packet)) {
+			bytes = recv(app->sock_fd,
+					 ((uint8_t *)&msg->packet) + offset,
+					 sizeof(msg->packet) - offset,
+					 0);
+			if (bytes < 0) {
+				if (errno == EINTR) {
+					continue;
+				}
+				free(msg);
+				if (atomic_load(&app->stop_requested)) {
+					break;
+				}
+				perror("recv");
+				atomic_store(&app->fatal_error, 1);
+				app_request_stop(app);
+				break;
+			}
+			if (bytes == 0) {
+				free(msg);
+				app_request_stop(app);
+				break;
+			}
+			offset += (size_t)bytes;
+		}
+
+		if (offset != sizeof(msg->packet)) {
+			break;
+		}
+#else
+		bytes = recv(app->sock_fd, &msg->packet, sizeof(msg->packet), 0);
 		if (bytes < 0) {
 			free(msg);
 			if (atomic_load(&app->stop_requested)) {
@@ -695,10 +729,11 @@ static void *receiver_thread_main(void *arg)
 			break;
 		}
 
-		if ((size_t)bytes != sizeof(msg->packet)) {
+		if ((size_t)bytes != sizeof(msg->packet) || msg->packet.packet_idx ==  UINT32_MAX) {
 			free(msg);
 			continue;
 		}
+#endif
 
 		uint64_t now_ns = monotonic_time_ns();
 		if (last_recv_ns != 0U && now_ns > last_recv_ns) {
@@ -1133,7 +1168,15 @@ int main(int argc, char **argv)
 	}
 	decoded_queue_ready = true;
 
-	sock_fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+	sock_fd = socket(AF_INET,
+#if USE_TCP
+			 SOCK_STREAM,
+			 IPPROTO_TCP
+#else
+			 SOCK_DGRAM,
+			 IPPROTO_UDP
+#endif
+			 );
 	if (sock_fd < 0) {
 		perror("socket");
 		goto out;
@@ -1158,14 +1201,23 @@ int main(int argc, char **argv)
 	}
 	app.sock_fd = sock_fd;
 
-	/* Tell the server we are ready so it starts transmitting. */
+	/* UDP mode requires an explicit start command. */
+#if !USE_TCP
 	const char *start_msg = "START";
 	if (send(sock_fd, start_msg, strlen(start_msg), 0) < 0) {
 		perror("send START");
 		goto out;
 	}
+#endif
 
-	printf("Listening for stream from %s:%d...\n", server_ip, port);
+	printf("Listening for %s stream from %s:%d...\n",
+#if USE_TCP
+		   "TCP",
+#else
+		   "UDP",
+#endif
+		   server_ip,
+		   port);
 
 	if (pthread_create(&receiver_thread, NULL, receiver_thread_main, &app) != 0) {
 		fprintf(stderr, "Failed to start receiver thread\n");

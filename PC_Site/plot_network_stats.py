@@ -3,7 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 CSV_FILE    = "results.csv"
-WINDOW_SIZE = 10000
+WINDOW_SIZE = 100
 
 df = pd.read_csv(CSV_FILE)
 
@@ -20,7 +20,7 @@ datarate  = win_bytes / win_time / 1e6   # bytes/s → MB/s
 dr_steps  = df["step"].to_numpy()[WINDOW_SIZE - 1:]
 
 # ── Plot ─────────────────────────────────────────────────────────────────────
-fig, axes = plt.subplots(4, 1, figsize=(12, 11), sharex=False)
+fig, axes = plt.subplots(5, 1, figsize=(12, 13), sharex=False)
 fig.suptitle("UDP Stream Statistics", fontsize=14)
 
 # 1 – Bytes per packet
@@ -45,12 +45,20 @@ axes[2].set_xlabel("Dropped packets")
 axes[2].set_title("Histogram of dropped packets")
 axes[2].grid(True, alpha=0.4, axis="y")
 
-# 4 – Sliding-window mean datarate
-axes[3].plot(dr_steps, datarate, linewidth=0.7, color="seagreen")
-axes[3].set_ylabel("MB/s")
+# 4 – Time taken per step
+axes[3].plot(df["step"], df["recv_time_us"] * 1e-6, linewidth=0.7, color="gold")
+axes[3].set_ylabel("Time (µs)")
 axes[3].set_xlabel("Step")
-axes[3].set_title(f"Mean datarate (sliding window = {WINDOW_SIZE} packets)")
+axes[3].set_title("Time taken per step")
 axes[3].grid(True, alpha=0.4)
+
+# 5 – Sliding-window mean datarate
+print(dr_steps.shape, datarate.shape)
+axes[4].plot(dr_steps, datarate, linewidth=0.7, color="seagreen")
+axes[4].set_ylabel("MB/s")
+axes[4].set_xlabel("Step")
+axes[4].set_title(f"Mean datarate (sliding window = {WINDOW_SIZE} packets)")
+axes[4].grid(True, alpha=0.4)
 
 plt.tight_layout()
 plt.savefig("network_stats.png", dpi=150)

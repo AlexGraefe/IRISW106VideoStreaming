@@ -24,6 +24,7 @@ add_compile_options(-Wall -Wextra -Wpedantic)
 
 # Client executable
 add_executable(udp_client udp_socket_client.c)
+add_executable(udp_server udp_socket_server.c)
 
 add_executable(decode h264_decode.c)
  target_link_libraries(decode PUBLIC PkgConfig::LIBAV)

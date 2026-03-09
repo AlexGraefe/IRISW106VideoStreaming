@@ -9,13 +9,17 @@
 #define PORT               8080
 #define STREAM_FLOAT_COUNT 350
 #define WARMUP_STEPS       100
-#define RECORD_STEPS       100000
+#define RECORD_STEPS       1000
 #define OUTPUT_CSV         "results.csv"
+
+#define IRIS_PACKET_PAYLOAD_SIZE 1400U
 
 /* Must match the server definition exactly */
 typedef struct __attribute__((packed)) {
-    uint32_t counter;
-    float    data[STREAM_FLOAT_COUNT];
+	uint32_t frame_nmbr;
+	uint32_t packet_idx;
+	uint32_t packet_nmbr;
+	uint8_t payload[IRIS_PACKET_PAYLOAD_SIZE];
 } __attribute__((packed)) stream_packet_t;
 
 #define PACKET_SIZE ((int)sizeof(stream_packet_t))
@@ -91,14 +95,14 @@ int main(int argc, char *argv[])
         }
         /* On the very first packet just seed last_counter */
         if (first_pkt) {
-            last_counter = pkt.counter;
+            last_counter = 0; // pkt.counter;
             first_pkt = 0;
             continue;
         }
 
         /* Warmup phase */
         if (warmup < WARMUP_STEPS) {
-            last_counter = pkt.counter;
+            last_counter = 0;  // pkt.counter;
             warmup++;
             if (warmup == WARMUP_STEPS) {
                 printf("[Client] Warmup done. Recording %d packets...\n", RECORD_STEPS);
@@ -109,7 +113,7 @@ int main(int argc, char *argv[])
 
 
         /* Recording phase */
-        int32_t dropped = (int32_t)(pkt.counter - last_counter) - 1;
+        int32_t dropped = 0; // (int32_t)(pkt.counter - last_counter) - 1;
 
         if (bytes != PACKET_SIZE) {
             dropped += 1;   /* count as drop if packet is incomplete */
@@ -130,7 +134,7 @@ int main(int argc, char *argv[])
         rec_time_us[step] = dt_us;
         step++;
 
-        last_counter = pkt.counter;
+        last_counter = 0; //pkt.counter;
 
         if (step >= RECORD_STEPS) {
             break;
