@@ -87,7 +87,7 @@ int wifi_connect(char *ssid, char *psk)
     params.psk = (const uint8_t *)psk;
     params.psk_length = strlen(psk);
     params.security = WIFI_SECURITY_TYPE_PSK;  // WPA2-PSK security
-    params.band = WIFI_FREQ_BAND_5_GHZ;
+    params.band = WIFI_FREQ_BAND_2_4_GHZ;   // WIFI_FREQ_BAND_5_GHZ
     params.channel = WIFI_CHANNEL_ANY;  // Auto-select the channel
     params.mfp = WIFI_MFP_OPTIONAL;
 

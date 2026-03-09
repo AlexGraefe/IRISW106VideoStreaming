@@ -1,3 +1,5 @@
+#define _POSIX_C_SOURCE 200809L
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -8,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <libavcodec/avcodec.h>
@@ -21,10 +24,13 @@
 #define ENCODED_QUEUE_CAPACITY 64U
 #define DECODED_QUEUE_CAPACITY 32U
 #define MAX_PACKETS_PER_FRAME 2048U
+#define STATS_WINDOW_SIZE 30U
+#define STATS_PRINT_INTERVAL_NS 1000000000ULL
+#define UDP_RCVBUF_BYTES (4 * 1024 * 1024)
 
 /* Set to 0 to compile out all printf/fprintf logging in this file. */
 #ifndef SHOW_STREAM_ENABLE_PRINTF
-#define SHOW_STREAM_ENABLE_PRINTF 0
+#define SHOW_STREAM_ENABLE_PRINTF 1
 #endif
 
 #if !SHOW_STREAM_ENABLE_PRINTF
@@ -92,6 +98,14 @@ typedef struct {
 	ptr_queue_t decoded_queue;
 } app_ctx_t;
 
+typedef struct {
+	double values[STATS_WINDOW_SIZE];
+	size_t count;
+	size_t next_idx;
+	double sum;
+	double sum_sq;
+} rolling_stats_t;
+
 static SDL_Window   *window = NULL;
 static SDL_Renderer *renderer = NULL;
 static SDL_Texture  *texture = NULL;
@@ -102,6 +116,76 @@ static void frame_assembly_reset(frame_assembly_t *assembly);
 static int frame_assembly_init(frame_assembly_t *assembly,
 							   uint32_t frame_nmbr,
 							   uint32_t packet_nmbr);
+static uint8_t *frame_assembly_take_data(frame_assembly_t *assembly);
+
+static uint64_t monotonic_time_ns(void)
+{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return ((uint64_t)ts.tv_sec * 1000000000ULL) + (uint64_t)ts.tv_nsec;
+}
+
+static void rolling_stats_init(rolling_stats_t *stats)
+{
+	memset(stats, 0, sizeof(*stats));
+}
+
+static void rolling_stats_push(rolling_stats_t *stats, double value)
+{
+	if (stats->count < STATS_WINDOW_SIZE) {
+		stats->values[stats->next_idx] = value;
+		stats->count++;
+	} else {
+		double old = stats->values[stats->next_idx];
+		stats->sum -= old;
+		stats->sum_sq -= old * old;
+		stats->values[stats->next_idx] = value;
+	}
+
+	stats->sum += value;
+	stats->sum_sq += value * value;
+	stats->next_idx = (stats->next_idx + 1U) % STATS_WINDOW_SIZE;
+}
+
+static double rolling_stats_mean(const rolling_stats_t *stats)
+{
+	if (stats->count == 0U) {
+		return 0.0;
+	}
+	return stats->sum / (double)stats->count;
+}
+
+static double rolling_stats_min(const rolling_stats_t *stats)
+{
+	if (stats->count == 0U) {
+		return 0.0;
+	}
+
+	double min_value = stats->values[0];
+	for (size_t i = 1U; i < stats->count; i++) {
+		if (stats->values[i] < min_value) {
+			min_value = stats->values[i];
+		}
+	}
+
+	return min_value;
+}
+
+static double rolling_stats_max(const rolling_stats_t *stats)
+{
+	if (stats->count == 0U) {
+		return 0.0;
+	}
+
+	double max_value = stats->values[0];
+	for (size_t i = 1U; i < stats->count; i++) {
+		if (stats->values[i] > max_value) {
+			max_value = stats->values[i];
+		}
+	}
+
+	return max_value;
+}
 
 static int ptr_queue_init(ptr_queue_t *queue, size_t capacity)
 {
@@ -502,8 +586,8 @@ static int decode_and_enqueue(app_ctx_t *app,
 			return 1;
 		}
 
-		printf("decoded frame %3" PRId64 " (%dx%d)\n",
-			   dec_ctx->frame_num, frame->width, frame->height);
+		// printf("decoded frame %3" PRId64 " (%dx%d)\n",
+		// 	   dec_ctx->frame_num, frame->width, frame->height);
 	}
 }
 
@@ -553,11 +637,26 @@ static int process_stream_bytes(AVCodecParserContext *parser,
 static void *receiver_thread_main(void *arg)
 {
 	app_ctx_t *app = arg;
+	rolling_stats_t recv_interval_stats;
+	rolling_stats_t first_packet_interval_stats;
+	uint64_t last_recv_ns = 0U;
+	uint64_t next_stats_print_ns = 0U;
+
+	rolling_stats_init(&recv_interval_stats);
+	rolling_stats_init(&first_packet_interval_stats);
 
 	while (!atomic_load(&app->stop_requested)) {
-		iris_packet_t pkt;
-		ssize_t bytes = recv(app->sock_fd, &pkt, sizeof(pkt), 0);
+		packet_msg_t *msg = malloc(sizeof(*msg));
+		if (!msg) {
+			fprintf(stderr, "Failed to allocate packet message\n");
+			atomic_store(&app->fatal_error, 1);
+			app_request_stop(app);
+			break;
+		}
+
+		ssize_t bytes = recv(app->sock_fd, &msg->packet, sizeof(msg->packet), 0);
 		if (bytes < 0) {
+			free(msg);
 			if (atomic_load(&app->stop_requested)) {
 				break;
 			}
@@ -570,18 +669,35 @@ static void *receiver_thread_main(void *arg)
 			break;
 		}
 
-		if ((size_t)bytes != sizeof(pkt)) {
+		if ((size_t)bytes != sizeof(msg->packet)) {
+			free(msg);
 			continue;
 		}
 
-		packet_msg_t *msg = malloc(sizeof(*msg));
-		if (!msg) {
-			fprintf(stderr, "Failed to allocate packet message\n");
-			atomic_store(&app->fatal_error, 1);
-			app_request_stop(app);
-			break;
+		uint64_t now_ns = monotonic_time_ns();
+		if (last_recv_ns != 0U && now_ns > last_recv_ns) {
+			double delta_ms = (double)(now_ns - last_recv_ns) / 1000000.0;
+			if (msg->packet.packet_idx == 0U) {
+				rolling_stats_push(&first_packet_interval_stats, delta_ms);
+			} else {
+				rolling_stats_push(&recv_interval_stats, delta_ms);
+			}
+
+			if (now_ns >= next_stats_print_ns) {
+				printf("recv interval stats (non-first packets, n=%zu): mean=%.3f ms min=%.3f ms max=%.3f ms\n",
+					   recv_interval_stats.count,
+					   rolling_stats_mean(&recv_interval_stats),
+					   rolling_stats_min(&recv_interval_stats),
+					   rolling_stats_max(&recv_interval_stats));
+				printf("recv interval stats (first packets, n=%zu): mean=%.3f ms min=%.3f ms max=%.3f ms\n",
+					   first_packet_interval_stats.count,
+					   rolling_stats_mean(&first_packet_interval_stats),
+					   rolling_stats_min(&first_packet_interval_stats),
+					   rolling_stats_max(&first_packet_interval_stats));
+				next_stats_print_ns = now_ns + STATS_PRINT_INTERVAL_NS;
+			}
 		}
-		msg->packet = pkt;
+		last_recv_ns = now_ns;
 
 		if (ptr_queue_push(&app->packet_queue, msg) != 0) {
 			free(msg);
@@ -597,6 +713,8 @@ static void *assembler_thread_main(void *arg)
 {
 	app_ctx_t *app = arg;
 	frame_assembly_t assembly = {0};
+	uint32_t last_completed_frame_nmbr = 0U;
+	bool have_last_completed_frame = false;
 
 	while (!atomic_load(&app->stop_requested)) {
 		packet_msg_t *msg = ptr_queue_pop(&app->packet_queue);
@@ -645,14 +763,14 @@ static void *assembler_thread_main(void *arg)
 				break;
 			}
 
-			if (frame_msg->frame_nmbr + 1 != assembly.frame_nmbr) {
+			if (have_last_completed_frame && last_completed_frame_nmbr + 1U != assembly.frame_nmbr) {
 				printf("Warning: non-sequential frame numbers (got %u, expected %u)\n",
-					   assembly.frame_nmbr, frame_msg->frame_nmbr + 1);
+					   assembly.frame_nmbr, last_completed_frame_nmbr + 1U);
 			}
 
 			frame_msg->frame_nmbr = assembly.frame_nmbr;
 			frame_msg->size = assembled_size;
-			frame_msg->data = malloc(assembled_size);
+			frame_msg->data = frame_assembly_take_data(&assembly);
 			if (!frame_msg->data) {
 				free(frame_msg);
 				fprintf(stderr, "Failed to allocate assembled frame bytes\n");
@@ -662,17 +780,19 @@ static void *assembler_thread_main(void *arg)
 				break;
 			}
 
-			memcpy(frame_msg->data, assembly.data, assembled_size);
-			printf("frame %u assembled (%u packets, %zu bytes)\n",
-				   assembly.frame_nmbr,
-				   assembly.packet_nmbr,
-				   assembled_size);
+			// printf("frame %u assembled (%u packets, %zu bytes)\n",
+			// 	   assembly.frame_nmbr,
+			// 	   assembly.packet_nmbr,
+			// 	   assembled_size);
 
 			if (ptr_queue_push(&app->encoded_queue, frame_msg) != 0) {
 				free_encoded_frame_msg(frame_msg);
 				free(msg);
 				break;
 			}
+
+			have_last_completed_frame = true;
+			last_completed_frame_nmbr = frame_msg->frame_nmbr;
 
 			frame_assembly_reset(&assembly);
 		}
@@ -688,12 +808,16 @@ static void *assembler_thread_main(void *arg)
 static void *decoder_thread_main(void *arg)
 {
 	app_ctx_t *app = arg;
+	rolling_stats_t decode_step_stats;
+	uint64_t next_decode_stats_print_ns = 0U;
 	AVPacket *pkt = NULL;
 	AVCodecParserContext *parser = NULL;
 	AVCodecContext *codec_ctx = NULL;
 	AVFrame *frame = NULL;
 	AVFrame *yuv_frame = NULL;
 	struct SwsContext *sws_ctx = NULL;
+
+	rolling_stats_init(&decode_step_stats);
 
 	pkt = av_packet_alloc();
 	if (!pkt) {
@@ -749,9 +873,23 @@ static void *decoder_thread_main(void *arg)
 			break;
 		}
 
+		uint64_t decode_start_ns = monotonic_time_ns();
+
 		int res = process_stream_bytes(parser, app, codec_ctx, pkt, frame,
 							   &sws_ctx, yuv_frame,
 							   msg->data, msg->size);
+		uint64_t decode_end_ns = monotonic_time_ns();
+		double decode_ms = (double)(decode_end_ns - decode_start_ns) / 1000000.0;
+		rolling_stats_push(&decode_step_stats, decode_ms);
+		if (decode_end_ns >= next_decode_stats_print_ns) {
+			printf("decode step stats (n=%zu): mean=%.3f ms min=%.3f ms max=%.3f ms\n",
+				   decode_step_stats.count,
+				   rolling_stats_mean(&decode_step_stats),
+				   rolling_stats_min(&decode_step_stats),
+				   rolling_stats_max(&decode_step_stats));
+			next_decode_stats_print_ns = decode_end_ns + STATS_PRINT_INTERVAL_NS;
+		}
+
 		free_encoded_frame_msg(msg);
 		if (res == 1) {
 			break;
@@ -880,7 +1018,7 @@ static int frame_assembly_init(frame_assembly_t *assembly,
 		return -1;
 	}
 
-	if ((size_t)packet_nmbr > (SIZE_MAX / IRIS_PACKET_PAYLOAD_SIZE)) {
+	if (((uint64_t)packet_nmbr * (uint64_t)IRIS_PACKET_PAYLOAD_SIZE) > (uint64_t)SIZE_MAX) {
 		fprintf(stderr,
 				"packet_nmbr overflow for frame %u: packet_nmbr=%u payload=%u\n",
 				frame_nmbr, packet_nmbr, IRIS_PACKET_PAYLOAD_SIZE);
@@ -905,6 +1043,18 @@ static int frame_assembly_init(frame_assembly_t *assembly,
 	}
 
 	return 0;
+}
+
+static uint8_t *frame_assembly_take_data(frame_assembly_t *assembly)
+{
+	uint8_t *data = assembly->data;
+	assembly->data = NULL;
+	free(assembly->received);
+	assembly->received = NULL;
+	assembly->frame_nmbr = 0U;
+	assembly->packet_nmbr = 0U;
+	assembly->received_count = 0U;
+	return data;
 }
 
 int main(int argc, char **argv)
@@ -968,6 +1118,11 @@ int main(int argc, char **argv)
 	if (sock_fd < 0) {
 		perror("socket");
 		goto out;
+	}
+
+	int rcvbuf = UDP_RCVBUF_BYTES;
+	if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf)) < 0) {
+		perror("setsockopt SO_RCVBUF");
 	}
 
 	memset(&server_addr, 0, sizeof(server_addr));

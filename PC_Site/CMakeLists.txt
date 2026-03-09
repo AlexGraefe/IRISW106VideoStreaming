@@ -34,4 +34,4 @@ target_link_libraries(visualize_h264 PUBLIC PkgConfig::LIBAV PkgConfig::SDL2)
 
 # UDP live stream receiver + visualizer
 add_executable(show_stream show_stream.c)
-target_link_libraries(show_stream PUBLIC PkgConfig::LIBAV PkgConfig::SDL2)
+target_link_libraries(show_stream PUBLIC PkgConfig::LIBAV PkgConfig::SDL2 m)
