@@ -22,7 +22,7 @@
 #define IRIS_PACKET_PAYLOAD_SIZE 1400U
 #define PACKET_QUEUE_CAPACITY 512U
 #define ENCODED_QUEUE_CAPACITY 64U
-#define DECODED_QUEUE_CAPACITY 32U
+#define DECODED_QUEUE_CAPACITY 30U
 #define MAX_PACKETS_PER_FRAME 2048U
 #define STATS_WINDOW_SIZE 30U
 #define STATS_PRINT_INTERVAL_NS 1000000000ULL
@@ -232,6 +232,27 @@ static int ptr_queue_push(ptr_queue_t *queue, void *item)
 	if (queue->closed) {
 		pthread_mutex_unlock(&queue->mutex);
 		return -1;
+	}
+
+	queue->items[queue->tail] = item;
+	queue->tail = (queue->tail + 1U) % queue->capacity;
+	queue->count++;
+	pthread_cond_signal(&queue->not_empty);
+	pthread_mutex_unlock(&queue->mutex);
+
+	return 0;
+}
+
+static int ptr_queue_try_push(ptr_queue_t *queue, void *item)
+{
+	pthread_mutex_lock(&queue->mutex);
+	if (queue->closed) {
+		pthread_mutex_unlock(&queue->mutex);
+		return -1;
+	}
+	if (queue->count == queue->capacity) {
+		pthread_mutex_unlock(&queue->mutex);
+		return 1;
 	}
 
 	queue->items[queue->tail] = item;
@@ -581,9 +602,14 @@ static int decode_and_enqueue(app_ctx_t *app,
 			return -1;
 		}
 
-		if (ptr_queue_push(&app->decoded_queue, out) != 0) {
+		int push_res = ptr_queue_try_push(&app->decoded_queue, out);
+		if (push_res < 0) {
 			free_decoded_frame_msg(out);
 			return 1;
+		}
+		if (push_res > 0) {
+			free_decoded_frame_msg(out);
+			continue;
 		}
 
 		// printf("decoded frame %3" PRId64 " (%dx%d)\n",
@@ -936,53 +962,46 @@ out:
 static void *display_thread_main(void *arg)
 {
 	app_ctx_t *app = arg;
-	const uint64_t frame_interval_ms = 33U;  //100U;
+	const uint64_t frame_interval_ms = 33U;
 	uint64_t next_present_ms = SDL_GetTicks64();
+	decoded_frame_msg_t *last_frame = NULL;
 
 	while (!atomic_load(&app->stop_requested)) {
-		decoded_frame_msg_t *latest = ptr_queue_pop(&app->decoded_queue);
-		if (!latest) {
+		if (poll_events() != 0) {
+			app_request_stop(app);
 			break;
-		}
-
-		while (1) {
-			decoded_frame_msg_t *newer = ptr_queue_try_pop(&app->decoded_queue);
-			if (!newer) {
-				break;
-			}
-			free_decoded_frame_msg(latest);
-			latest = newer;
 		}
 
 		uint64_t now_ms = SDL_GetTicks64();
 		if (now_ms < next_present_ms) {
 			SDL_Delay((Uint32)(next_present_ms - now_ms));
-			now_ms = next_present_ms;
+			continue;
 		}
 
+		decoded_frame_msg_t *next_frame = ptr_queue_try_pop(&app->decoded_queue);
+		if (next_frame) {
+			free_decoded_frame_msg(last_frame);
+			last_frame = next_frame;
+		}
+
+		if (last_frame) {
+			if (display_frame(last_frame) < 0) {
+				fprintf(stderr, "Display failed\n");
+				atomic_store(&app->fatal_error, 1);
+				app_request_stop(app);
+				break;
+			}
+		}
+
+		next_present_ms += frame_interval_ms;
+		now_ms = SDL_GetTicks64();
 		if (now_ms > next_present_ms + frame_interval_ms) {
 			uint64_t ticks_behind = (now_ms - next_present_ms) / frame_interval_ms;
 			next_present_ms += ticks_behind * frame_interval_ms;
 		}
-
-		if (display_frame(latest) < 0) {
-			fprintf(stderr, "Display failed\n");
-			free_decoded_frame_msg(latest);
-			atomic_store(&app->fatal_error, 1);
-			app_request_stop(app);
-			break;
-		}
-
-		next_present_ms += frame_interval_ms;
-
-		if (poll_events() != 0) {
-			free_decoded_frame_msg(latest);
-			app_request_stop(app);
-			break;
-		}
-
-		free_decoded_frame_msg(latest);
 	}
+
+	free_decoded_frame_msg(last_frame);
 
 	cleanup_sdl();
 	return NULL;
