@@ -22,6 +22,16 @@
 #define DECODED_QUEUE_CAPACITY 32U
 #define MAX_PACKETS_PER_FRAME 2048U
 
+/* Set to 0 to compile out all printf/fprintf logging in this file. */
+#ifndef SHOW_STREAM_ENABLE_PRINTF
+#define SHOW_STREAM_ENABLE_PRINTF 0
+#endif
+
+#if !SHOW_STREAM_ENABLE_PRINTF
+#define printf(...) ((void)0)
+#define fprintf(...) ((void)0)
+#endif
+
 /* Must match the packet layout sent by the embedded UDP server. */
 typedef struct __attribute__((packed)) {
 	uint32_t frame_nmbr;
@@ -166,6 +176,22 @@ static void *ptr_queue_pop(ptr_queue_t *queue)
 	queue->head = (queue->head + 1U) % queue->capacity;
 	queue->count--;
 	pthread_cond_signal(&queue->not_full);
+	pthread_mutex_unlock(&queue->mutex);
+
+	return item;
+}
+
+static void *ptr_queue_try_pop(ptr_queue_t *queue)
+{
+	void *item = NULL;
+
+	pthread_mutex_lock(&queue->mutex);
+	if (queue->count > 0U) {
+		item = queue->items[queue->head];
+		queue->head = (queue->head + 1U) % queue->capacity;
+		queue->count--;
+		pthread_cond_signal(&queue->not_full);
+	}
 	pthread_mutex_unlock(&queue->mutex);
 
 	return item;
@@ -772,28 +798,52 @@ out:
 static void *display_thread_main(void *arg)
 {
 	app_ctx_t *app = arg;
+	const uint64_t frame_interval_ms = 33U;  //100U;
+	uint64_t next_present_ms = SDL_GetTicks64();
 
 	while (!atomic_load(&app->stop_requested)) {
-		decoded_frame_msg_t *msg = ptr_queue_pop(&app->decoded_queue);
-		if (!msg) {
+		decoded_frame_msg_t *latest = ptr_queue_pop(&app->decoded_queue);
+		if (!latest) {
 			break;
 		}
 
-		if (display_frame(msg) < 0) {
+		while (1) {
+			decoded_frame_msg_t *newer = ptr_queue_try_pop(&app->decoded_queue);
+			if (!newer) {
+				break;
+			}
+			free_decoded_frame_msg(latest);
+			latest = newer;
+		}
+
+		uint64_t now_ms = SDL_GetTicks64();
+		if (now_ms < next_present_ms) {
+			SDL_Delay((Uint32)(next_present_ms - now_ms));
+			now_ms = next_present_ms;
+		}
+
+		if (now_ms > next_present_ms + frame_interval_ms) {
+			uint64_t ticks_behind = (now_ms - next_present_ms) / frame_interval_ms;
+			next_present_ms += ticks_behind * frame_interval_ms;
+		}
+
+		if (display_frame(latest) < 0) {
 			fprintf(stderr, "Display failed\n");
-			free_decoded_frame_msg(msg);
+			free_decoded_frame_msg(latest);
 			atomic_store(&app->fatal_error, 1);
 			app_request_stop(app);
 			break;
 		}
 
+		next_present_ms += frame_interval_ms;
+
 		if (poll_events() != 0) {
-			free_decoded_frame_msg(msg);
+			free_decoded_frame_msg(latest);
 			app_request_stop(app);
 			break;
 		}
 
-		free_decoded_frame_msg(msg);
+		free_decoded_frame_msg(latest);
 	}
 
 	cleanup_sdl();
